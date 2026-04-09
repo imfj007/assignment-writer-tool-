@@ -1,0 +1,407 @@
+//@version=5
+indicator("Institutional SMC + ICT Structure Engine [Non-Repaint]", overlay=true, max_lines_count=500, max_boxes_count=300, max_labels_count=300)
+
+//==================================================================================================
+// INPUTS
+//==================================================================================================
+swingLen            = input.int(3, "Swing Length", minval=2, maxval=20)
+internalSwingLen    = input.int(2, "Internal Swing Length", minval=1, maxval=10)
+atrLen              = input.int(14, "ATR Length", minval=5)
+displacementMult    = input.float(1.5, "OB Displacement ATR Multiplier", minval=0.5, step=0.1)
+eqTolerancePct      = input.float(0.08, "Equal High/Low Tolerance %", minval=0.01, step=0.01)
+fvgMinAtrPct        = input.float(0.15, "FVG Minimum Size (ATR %)", minval=0.01, step=0.01)
+htf                 = input.timeframe("240", "Higher Timeframe")
+maxZones            = input.int(15, "Max Active Zones", minval=5, maxval=60)
+
+showOB              = input.bool(true, "Show Order Blocks")
+showFVG             = input.bool(true, "Show FVG")
+showLiq             = input.bool(true, "Show Liquidity")
+showPremDisc        = input.bool(true, "Show Premium/Discount")
+showSessions        = input.bool(true, "Show Sessions")
+showSetups          = input.bool(true, "Show Trade Setup")
+useHTFAlignment     = input.bool(true, "Require HTF Alignment")
+
+//==================================================================================================
+// HELPERS
+//==================================================================================================
+atr = ta.atr(atrLen)
+
+f_biasText(_v) => _v == 1 ? "Bullish" : _v == -1 ? "Bearish" : "Neutral"
+f_biasColor(_v) => _v == 1 ? color.lime : _v == -1 ? color.red : color.silver
+
+f_sessionName() =>
+    h = hour(time)
+    m = minute(time)
+    hm = h * 60 + m
+    asian = hm >= 0 and hm < 480
+    london = hm >= 480 and hm < 960
+    newyork = hm >= 780 and hm < 1260
+    asian ? "Asian" : london ? "London" : newyork ? "New York" : "Off Session"
+
+f_trim_box_arrays(_boxes, _tops, _bots, _types, _active, _max) =>
+    while array.size(_boxes) > _max
+        b = array.shift(_boxes)
+        array.shift(_tops)
+        array.shift(_bots)
+        array.shift(_types)
+        array.shift(_active)
+        box.delete(b)
+
+//==================================================================================================
+// FRACTAL SWING ENGINES (NON-REPAINT)
+// Using ta.pivothigh/ta.pivotlow ensures we only confirm a swing after right-side candles close.
+// This means pivots are finalized on bar close with a fixed delay = swingLen.
+//==================================================================================================
+extPH = ta.pivothigh(high, swingLen, swingLen)
+extPL = ta.pivotlow(low, swingLen, swingLen)
+intPH = ta.pivothigh(high, internalSwingLen, internalSwingLen)
+intPL = ta.pivotlow(low, internalSwingLen, internalSwingLen)
+
+var float extLastHigh = na
+var float extPrevHigh = na
+var float extLastLow  = na
+var float extPrevLow  = na
+var int   extHighBar  = na
+var int   extLowBar   = na
+var int   externalBias = 0
+
+var float intLastHigh = na
+var float intPrevHigh = na
+var float intLastLow  = na
+var float intPrevLow  = na
+var int   internalBias = 0
+
+if barstate.isconfirmed
+    if not na(extPH)
+        extPrevHigh := extLastHigh
+        extLastHigh := extPH
+        extHighBar := bar_index - swingLen
+        lbl = na(extPrevHigh) ? "H" : extLastHigh > extPrevHigh ? "HH" : "LH"
+        label.new(extHighBar, extLastHigh, lbl, style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+    if not na(extPL)
+        extPrevLow := extLastLow
+        extLastLow := extPL
+        extLowBar := bar_index - swingLen
+        lbl = na(extPrevLow) ? "L" : extLastLow > extPrevLow ? "HL" : "LL"
+        label.new(extLowBar, extLastLow, lbl, style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+
+    if not na(intPH)
+        intPrevHigh := intLastHigh
+        intLastHigh := intPH
+
+    if not na(intPL)
+        intPrevLow := intLastLow
+        intLastLow := intPL
+
+//==================================================================================================
+// BOS / CHOCH / MSS
+// Confirmed only on closed candles using close >/< confirmed pivot levels.
+//==================================================================================================
+var bool extBullBOS = false
+var bool extBearBOS = false
+var bool intBullBOS = false
+var bool intBearBOS = false
+var bool choch = false
+var bool mss = false
+
+extBullBOS := false
+extBearBOS := false
+intBullBOS := false
+intBearBOS := false
+choch := false
+mss := false
+
+if barstate.isconfirmed
+    if not na(extLastHigh) and close > extLastHigh and close[1] <= extLastHigh
+        extBullBOS := true
+        old = externalBias
+        externalBias := 1
+        choch := old == -1
+        mss := old != 1
+        line.new(bar_index - 1, extLastHigh, bar_index, extLastHigh, extend=extend.right, color=color.new(color.lime, 0), style=line.style_solid)
+        label.new(bar_index, extLastHigh, choch ? "CHoCH↑" : mss ? "MSS↑" : "BOS↑", style=label.style_label_up, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
+
+    if not na(extLastLow) and close < extLastLow and close[1] >= extLastLow
+        extBearBOS := true
+        old = externalBias
+        externalBias := -1
+        choch := old == 1
+        mss := old != -1
+        line.new(bar_index - 1, extLastLow, bar_index, extLastLow, extend=extend.right, color=color.new(color.red, 0), style=line.style_solid)
+        label.new(bar_index, extLastLow, choch ? "CHoCH↓" : mss ? "MSS↓" : "BOS↓", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+    if not na(intLastHigh) and close > intLastHigh and close[1] <= intLastHigh
+        intBullBOS := true
+        internalBias := 1
+
+    if not na(intLastLow) and close < intLastLow and close[1] >= intLastLow
+        intBearBOS := true
+        internalBias := -1
+
+//==================================================================================================
+// ORDER BLOCK ENGINE
+// OB = last opposite candle before displacement candle that caused BOS.
+//==================================================================================================
+var box[] obBoxes = array.new_box()
+var float[] obTop = array.new_float()
+var float[] obBottom = array.new_float()
+var int[] obType = array.new_int()      // 1 bullish, -1 bearish
+var bool[] obActive = array.new_bool()
+
+f_createOB(_isBull) =>
+    src = 1
+    found = false
+    for i = 1 to 8
+        if _isBull and close[i] < open[i]
+            src := i
+            found := true
+            break
+        if not _isBull and close[i] > open[i]
+            src := i
+            found := true
+            break
+    if found
+        top = _isBull ? open[src] : high[src]
+        bot = _isBull ? low[src] : open[src]
+        col = _isBull ? color.new(color.green, 82) : color.new(color.red, 82)
+        b = box.new(bar_index - src, top, bar_index + 1, bot, border_color=color.new(col, 0), bgcolor=col, extend=extend.right)
+        array.push(obBoxes, b)
+        array.push(obTop, top)
+        array.push(obBottom, bot)
+        array.push(obType, _isBull ? 1 : -1)
+        array.push(obActive, true)
+
+if showOB and barstate.isconfirmed
+    bullDisp = extBullBOS and (close - open) > atr * displacementMult
+    bearDisp = extBearBOS and (open - close) > atr * displacementMult
+    if bullDisp
+        f_createOB(true)
+    if bearDisp
+        f_createOB(false)
+
+if showOB and barstate.isconfirmed
+    for i = 0 to array.size(obBoxes) - 1
+        if array.get(obActive, i)
+            typ = array.get(obType, i)
+            top = array.get(obTop, i)
+            bot = array.get(obBottom, i)
+            mitigated = typ == 1 ? low <= bot : high >= top
+            if mitigated
+                array.set(obActive, i, false)
+                bx = array.get(obBoxes, i)
+                box.delete(bx)
+
+if showOB
+    f_trim_box_arrays(obBoxes, obTop, obBottom, obType, obActive, maxZones)
+
+//==================================================================================================
+// FVG ENGINE
+//==================================================================================================
+var box[] fvgBoxes = array.new_box()
+var float[] fvgTop = array.new_float()
+var float[] fvgBottom = array.new_float()
+var int[] fvgType = array.new_int()     // 1 bullish, -1 bearish
+var bool[] fvgActive = array.new_bool()
+
+if showFVG and bar_index >= 2 and barstate.isconfirmed
+    bullFVG = low > high[2]
+    bearFVG = high < low[2]
+    minGap = atr * fvgMinAtrPct
+    if bullFVG and (low - high[2]) >= minGap
+        top = low
+        bot = high[2]
+        b = box.new(bar_index - 2, top, bar_index + 1, bot, border_color=color.new(color.teal, 0), bgcolor=color.new(color.teal, 85), extend=extend.right)
+        array.push(fvgBoxes, b)
+        array.push(fvgTop, top)
+        array.push(fvgBottom, bot)
+        array.push(fvgType, 1)
+        array.push(fvgActive, true)
+    if bearFVG and (low[2] - high) >= minGap
+        top = low[2]
+        bot = high
+        b = box.new(bar_index - 2, top, bar_index + 1, bot, border_color=color.new(color.orange, 0), bgcolor=color.new(color.orange, 85), extend=extend.right)
+        array.push(fvgBoxes, b)
+        array.push(fvgTop, top)
+        array.push(fvgBottom, bot)
+        array.push(fvgType, -1)
+        array.push(fvgActive, true)
+
+if showFVG and barstate.isconfirmed
+    for i = 0 to array.size(fvgBoxes) - 1
+        if array.get(fvgActive, i)
+            typ = array.get(fvgType, i)
+            top = array.get(fvgTop, i)
+            bot = array.get(fvgBottom, i)
+            filled = typ == 1 ? low <= bot : high >= top
+            if filled
+                array.set(fvgActive, i, false)
+                box.delete(array.get(fvgBoxes, i))
+
+if showFVG
+    f_trim_box_arrays(fvgBoxes, fvgTop, fvgBottom, fvgType, fvgActive, maxZones)
+
+//==================================================================================================
+// LIQUIDITY ENGINE
+//==================================================================================================
+liqTol = close * (eqTolerancePct / 100.0)
+
+var float eqHigh = na
+var float eqLow = na
+var bool buySideLiq = false
+var bool sellSideLiq = false
+var bool buySweep = false
+var bool sellSweep = false
+
+buySweep := false
+sellSweep := false
+
+if showLiq and barstate.isconfirmed
+    if not na(extLastHigh) and not na(extPrevHigh)
+        buySideLiq := math.abs(extLastHigh - extPrevHigh) <= liqTol
+        if buySideLiq
+            eqHigh := math.max(extLastHigh, extPrevHigh)
+            line.new(bar_index - swingLen, eqHigh, bar_index, eqHigh, extend=extend.right, color=color.new(color.fuchsia, 0), style=line.style_dotted)
+    if not na(extLastLow) and not na(extPrevLow)
+        sellSideLiq := math.abs(extLastLow - extPrevLow) <= liqTol
+        if sellSideLiq
+            eqLow := math.min(extLastLow, extPrevLow)
+            line.new(bar_index - swingLen, eqLow, bar_index, eqLow, extend=extend.right, color=color.new(color.aqua, 0), style=line.style_dotted)
+
+    if buySideLiq and not na(eqHigh)
+        buySweep := high > eqHigh and close < eqHigh
+        if buySweep
+            label.new(bar_index, high, "Buy Liquidity Sweep", style=label.style_label_down, color=color.new(color.fuchsia, 0), textcolor=color.white, size=size.tiny)
+
+    if sellSideLiq and not na(eqLow)
+        sellSweep := low < eqLow and close > eqLow
+        if sellSweep
+            label.new(bar_index, low, "Sell Liquidity Sweep", style=label.style_label_up, color=color.new(color.aqua, 0), textcolor=color.black, size=size.tiny)
+
+//==================================================================================================
+// PREMIUM / DISCOUNT
+//==================================================================================================
+var line eqLine = na
+var box premBox = na
+var box discBox = na
+
+if showPremDisc and not na(extLastHigh) and not na(extLastLow)
+    hi = math.max(extLastHigh, extLastLow)
+    lo = math.min(extLastHigh, extLastLow)
+    eq = (hi + lo) * 0.5
+    if barstate.isconfirmed
+        line.delete(eqLine)
+        box.delete(premBox)
+        box.delete(discBox)
+        eqLine := line.new(bar_index - 1, eq, bar_index + 1, eq, extend=extend.right, color=color.new(color.yellow, 0), style=line.style_dashed)
+        premBox := box.new(bar_index - 1, hi, bar_index + 1, eq, bgcolor=color.new(color.red, 92), border_color=color.new(color.red, 80), extend=extend.right)
+        discBox := box.new(bar_index - 1, eq, bar_index + 1, lo, bgcolor=color.new(color.green, 92), border_color=color.new(color.green, 80), extend=extend.right)
+
+inPremium = not na(extLastHigh) and not na(extLastLow) and close > (math.max(extLastHigh, extLastLow) + math.min(extLastHigh, extLastLow)) * 0.5
+inDiscount = not na(extLastHigh) and not na(extLastLow) and close < (math.max(extLastHigh, extLastLow) + math.min(extLastHigh, extLastLow)) * 0.5
+
+//==================================================================================================
+// HTF BIAS (NON-REPAINT)
+// request.security with lookahead_off and closed values only.
+//==================================================================================================
+htfClose = request.security(syminfo.tickerid, htf, close, lookahead=barmerge.lookahead_off)
+htfHighPivot = request.security(syminfo.tickerid, htf, ta.pivothigh(high, swingLen, swingLen), lookahead=barmerge.lookahead_off)
+htfLowPivot = request.security(syminfo.tickerid, htf, ta.pivotlow(low, swingLen, swingLen), lookahead=barmerge.lookahead_off)
+
+var float htfLastHigh = na
+var float htfLastLow = na
+var int htfBias = 0
+
+if barstate.isconfirmed
+    if not na(htfHighPivot)
+        htfLastHigh := htfHighPivot
+    if not na(htfLowPivot)
+        htfLastLow := htfLowPivot
+    if not na(htfLastHigh) and htfClose > htfLastHigh
+        htfBias := 1
+    if not na(htfLastLow) and htfClose < htfLastLow
+        htfBias := -1
+
+if barstate.islast
+    label.new(bar_index, high, "HTF: " + f_biasText(htfBias), style=label.style_label_left, color=color.new(f_biasColor(htfBias), 15), textcolor=color.black)
+
+//==================================================================================================
+// TRADE SETUP ENGINE
+//==================================================================================================
+f_hasActiveOB(_typ) =>
+    has = false
+    for i = 0 to array.size(obBoxes) - 1
+        if array.get(obActive, i) and array.get(obType, i) == _typ
+            has := true
+    has
+
+hasBullOB = showOB ? f_hasActiveOB(1) : true
+hasBearOB = showOB ? f_hasActiveOB(-1) : true
+
+htfBullOK = useHTFAlignment ? htfBias == 1 : true
+htfBearOK = useHTFAlignment ? htfBias == -1 : true
+
+longSetup = htfBullOK and inDiscount and hasBullOB and intBullBOS and sellSweep
+shortSetup = htfBearOK and inPremium and hasBearOB and intBearBOS and buySweep
+
+if showSetups and barstate.isconfirmed
+    if longSetup and not na(intLastLow)
+        entry = close
+        stop = intLastLow
+        target = not na(eqHigh) ? eqHigh : entry + (entry - stop) * 2.0
+        rr = (target - entry) / math.max(entry - stop, syminfo.mintick)
+        box.new(bar_index, entry, bar_index + 10, stop, bgcolor=color.new(color.green, 88), border_color=color.new(color.green, 0))
+        label.new(bar_index, entry, "Long Setup\nRR: " + str.tostring(rr, "#.##"), style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.black)
+        line.new(bar_index, target, bar_index + 10, target, color=color.new(color.lime, 0), style=line.style_dashed)
+
+    if shortSetup and not na(intLastHigh)
+        entry = close
+        stop = intLastHigh
+        target = not na(eqLow) ? eqLow : entry - (stop - entry) * 2.0
+        rr = (entry - target) / math.max(stop - entry, syminfo.mintick)
+        box.new(bar_index, stop, bar_index + 10, entry, bgcolor=color.new(color.red, 88), border_color=color.new(color.red, 0))
+        label.new(bar_index, entry, "Short Setup\nRR: " + str.tostring(rr, "#.##"), style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+        line.new(bar_index, target, bar_index + 10, target, color=color.new(color.orange, 0), style=line.style_dashed)
+
+//==================================================================================================
+// DASHBOARD
+//==================================================================================================
+var table dash = table.new(position.top_right, 2, 8, frame_color=color.new(color.gray, 40), border_color=color.new(color.gray, 30), bgcolor=color.new(color.black, 70))
+
+activeOBCount = 0
+for i = 0 to array.size(obActive) - 1
+    if array.get(obActive, i)
+        activeOBCount += 1
+
+activeFVGCount = 0
+for i = 0 to array.size(fvgActive) - 1
+    if array.get(fvgActive, i)
+        activeFVGCount += 1
+
+rrText = longSetup and not na(intLastLow) ? str.tostring((close - (not na(eqHigh) ? eqHigh : close + (close - intLastLow) * 2.0)) / math.max(close - intLastLow, syminfo.mintick), "#.##") :
+     shortSetup and not na(intLastHigh) ? str.tostring(((not na(eqLow) ? eqLow : close - (intLastHigh - close) * 2.0) - close) / math.max(intLastHigh - close, syminfo.mintick), "#.##") : "-"
+
+if barstate.islast
+    table.cell(dash, 0, 0, "External Bias", text_color=color.white)
+    table.cell(dash, 1, 0, f_biasText(externalBias), text_color=f_biasColor(externalBias))
+
+    table.cell(dash, 0, 1, "Internal Bias", text_color=color.white)
+    table.cell(dash, 1, 1, f_biasText(internalBias), text_color=f_biasColor(internalBias))
+
+    table.cell(dash, 0, 2, "HTF Bias", text_color=color.white)
+    table.cell(dash, 1, 2, f_biasText(htfBias), text_color=f_biasColor(htfBias))
+
+    table.cell(dash, 0, 3, "Active OB", text_color=color.white)
+    table.cell(dash, 1, 3, str.tostring(activeOBCount), text_color=color.new(color.green, 0))
+
+    table.cell(dash, 0, 4, "Active FVG", text_color=color.white)
+    table.cell(dash, 1, 4, str.tostring(activeFVGCount), text_color=color.new(color.orange, 0))
+
+    table.cell(dash, 0, 5, "Session", text_color=color.white)
+    table.cell(dash, 1, 5, showSessions ? f_sessionName() : "Hidden", text_color=color.new(color.aqua, 0))
+
+    table.cell(dash, 0, 6, "Setup", text_color=color.white)
+    table.cell(dash, 1, 6, longSetup ? "Long" : shortSetup ? "Short" : "None", text_color=longSetup ? color.lime : shortSetup ? color.red : color.silver)
+
+    table.cell(dash, 0, 7, "Risk:Reward", text_color=color.white)
+    table.cell(dash, 1, 7, rrText, text_color=color.new(color.yellow, 0))
